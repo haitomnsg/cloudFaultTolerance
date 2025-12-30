@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fault Tolerance Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-start py-10">
+  <div class="w-full max-w-3xl px-4">
+    <h1 class="text-3xl font-bold mb-2 text-center">Load Balancer & Fault Tolerance Demo</h1>
+    <p class="text-slate-300 mb-6 text-center">
+      Nginx is distributing requests across four Python web servers (web1–web4).<br>
+      Bring some containers down with <span class="font-mono">docker-compose stop webX</span> and watch traffic shift.
+    </p>
+
+    <div class="flex flex-wrap gap-3 mb-6 justify-center">
+      <button id="send-once" class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-sm font-semibold">
+        Send Single Request
+      </button>
+      <button id="toggle-auto" class="px-4 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 text-sm font-semibold">
+        Start Auto Requests
+      </button>
+      <span id="status" class="text-sm text-slate-300 self-center"></span>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8" id="servers-grid">
+      <!-- Server cards populated by JS -->
+    </div>
+
+    <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-4 text-sm font-mono">
+      <div class="flex justify-between mb-2">
+        <span class="font-semibold">Last Response</span>
+        <span id="last-timestamp" class="text-xs text-slate-400"></span>
+      </div>
+      <pre id="last-response" class="whitespace-pre-wrap text-slate-200">(no responses yet)</pre>
+    </div>
+  </div>
+
+  <script>
+    const serverNames = ["web1", "web2", "web3", "web4"]; // expected hostnames
+    const counts = Object.fromEntries(serverNames.map(n => [n, 0]));
+    const activeState = Object.fromEntries(serverNames.map(n => [n, true]));
+
+    const grid = document.getElementById("servers-grid");
+    const statusEl = document.getElementById("status");
+    const lastRespEl = document.getElementById("last-response");
+    const lastTsEl = document.getElementById("last-timestamp");
+    const sendOnceBtn = document.getElementById("send-once");
+    const toggleAutoBtn = document.getElementById("toggle-auto");
+
+    let auto = false;
+    let timer = null;
+
+    function renderCards() {
+      grid.innerHTML = "";
+      serverNames.forEach(name => {
+        const total = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
+        const c = counts[name];
+        const pct = Math.round((c / total) * 100);
+        const active = activeState[name];
+
+        const card = document.createElement("div");
+        card.className = `rounded-xl border p-4 transition ${active ? "border-emerald-500/70 bg-emerald-500/5" : "border-rose-500/70 bg-rose-500/5"}`;
+        card.innerHTML = `
+          <div class="flex justify-between items-center mb-2">
+            <div>
+              <div class="text-lg font-semibold">${name}</div>
+              <div class="text-xs ${active ? "text-emerald-400" : "text-rose-300"}">
+                Status: ${active ? "ACTIVE" : "INACTIVE (simulated failure)"}
+              </div>
+            </div>
+            <div class="text-right">
+              <div class="text-2xl font-bold">${c}</div>
+              <div class="text-xs text-slate-400">responses</div>
+            </div>
+          </div>
+          <div class="flex items-center justify-between mb-2 text-xs text-slate-400">
+            <span>Container: ${name}</span>
+            <button
+              data-name="${name}"
+              class="toggle-btn px-2 py-1 rounded-md text-xs font-semibold ${active ? "bg-rose-500 hover:bg-rose-600" : "bg-emerald-500 hover:bg-emerald-600"}"
+            >
+              ${active ? "Simulate Failure" : "Restore Server"}
+            </button>
+          </div>
+          <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+            <div class="bg-emerald-500 h-2" style="width: ${pct}%;"></div>
+          </div>
+          <div class="mt-1 text-xs text-slate-400">${pct}% of traffic</div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    async function sendRequest() {
+      try {
+        statusEl.textContent = "Sending request...";
+        const res = await fetch("/api", { cache: "no-store" });
+        const text = await res.text();
+        lastRespEl.textContent = text.trim() || "(empty response)";
+        lastTsEl.textContent = new Date().toLocaleTimeString();
+
+        const match = text.match(/Response from server:\s*(.+)/i);
+        if (match && match[1]) {
+          const host = match[1].trim();
+          if (!(host in counts)) {
+            counts[host] = 0; // in case hostname differs (e.g. container ids)
+            serverNames.push(host);
+            activeState[host] = true;
+          }
+          counts[host] = (counts[host] || 0) + 1;
+          renderCards();
+        }
+
+        statusEl.textContent = "OK";
+      } catch (err) {
+        statusEl.textContent = "Error talking to /api (maybe some containers are down?)";
+        lastRespEl.textContent = String(err);
+        lastTsEl.textContent = new Date().toLocaleTimeString();
+      }
+    }
+
+    async function toggleServer(name, desiredActive) {
+      statusEl.textContent = `Toggling ${name} ${desiredActive ? "ON" : "OFF"}...`;
+
+      // Try multiple times because the control request itself is load-balanced
+      let success = false;
+      for (let i = 0; i < 8; i++) {
+        try {
+          const res = await fetch(`/control/toggle?target=${encodeURIComponent(name)}&active=${desiredActive}`);
+          const text = await res.text();
+          lastRespEl.textContent = text.trim();
+          lastTsEl.textContent = new Date().toLocaleTimeString();
+
+          if (text.includes("STATUS UPDATED")) {
+            success = true;
+            break;
+          }
+        } catch (err) {
+          // ignore and retry
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      if (success) {
+        activeState[name] = desiredActive;
+        renderCards();
+        statusEl.textContent = `${name} is now ${desiredActive ? "ACTIVE" : "INACTIVE"}.`;
+      } else {
+        statusEl.textContent = `Could not confirm toggle for ${name} (try again).`;
+      }
+    }
+
+    sendOnceBtn.addEventListener("click", () => {
+      sendRequest();
+    });
+
+    toggleAutoBtn.addEventListener("click", () => {
+      auto = !auto;
+      if (auto) {
+        toggleAutoBtn.textContent = "Stop Auto Requests";
+        statusEl.textContent = "Auto mode: sending every 1s";
+        sendRequest();
+        timer = setInterval(sendRequest, 1000);
+      } else {
+        toggleAutoBtn.textContent = "Start Auto Requests";
+        statusEl.textContent = "Auto mode off";
+        if (timer) clearInterval(timer);
+      }
+    });
+
+    grid.addEventListener("click", (e) => {
+      const btn = e.target.closest(".toggle-btn");
+      if (!btn) return;
+      const name = btn.getAttribute("data-name");
+      const currentlyActive = !!activeState[name];
+      toggleServer(name, !currentlyActive);
+    });
+
+    // Initial render
+    renderCards();
+  </script>
+</body>
+</html>

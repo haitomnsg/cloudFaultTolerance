@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  web1:
+    build: .
+    container_name: web1
+    environment:
+      - SERVER_NAME=web1
+
+  web2:
+    build: .
+    container_name: web2
+    environment:
+      - SERVER_NAME=web2
+
+  web3:
+    build: .
+    container_name: web3
+    environment:
+      - SERVER_NAME=web3
+
+  web4:
+    build: .
+    container_name: web4
+    environment:
+      - SERVER_NAME=web4
+
+  loadbalancer:
+    image: nginx:latest
+    container_name: nginx_lb
+    ports:
+      - "8080:80"
+    volumes:
+      - ./ngix.conf:/etc/nginx/nginx.conf:ro
+      - ./static:/usr/share/nginx/html:ro
+    depends_on:
+      - web1
+      - web2
+      - web3
+      - web4
